@@ -1,68 +1,87 @@
-import Fastify from "fastify";
-import pg from "pg";
-import cors from "@fastify/cors";
+import express from "express";
+import cors from "cors";
+import { generateHandler } from "./api/generate.js";
+import archiver from "archiver";
 
-const fastify = Fastify({ logger: true });
+const app = express();
+const PORT = 3001;
 
-// register CORS so the studio dev server can call the API
-await fastify.register(cors, { origin: true });
+app.use(cors());
+app.use(express.json());
 
-const pool = new pg.Pool({
-  host: process.env.PGHOST || "localhost",
-  port: Number(process.env.PGPORT || 5432),
-  user: process.env.PGUSER || "titonova",
-  password: process.env.PGPASSWORD || "titonova_pw",
-  database: process.env.PGDATABASE || "titonova",
-});
+app.post("/api/generate", generateHandler);
 
-fastify.get("/health", async () => ({ ok: true }));
+app.post('/api/generate-app', async (req, res) => {
+  const { prompt } = req.body || {};
+  if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
 
-fastify.get("/health_check", async () => {
-  const { rows } = await pool.query("SELECT * FROM health_check ORDER BY id DESC LIMIT 20");
-  return rows;
-});
+  // If no OpenAI key configured, return a simple zip with a mock scaffold
+  if (!process.env.OPENAI_API_KEY) {
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="titonova-app.zip"');
 
-fastify.post("/health_check", async (req) => {
-  const msg = (req.body && req.body.message) ? req.body.message : "Hello from TitoNova API";
-  const { rows } = await pool.query(
-    "INSERT INTO health_check(message) VALUES($1) RETURNING *",
-    [msg]
-  );
-  return rows[0];
-});
-
-fastify.post('/ai', async (req) => {
-  const prompt = req.body && req.body.prompt ? String(req.body.prompt) : '';
-
-  if (!prompt) return { error: 'prompt is required' };
-
-  // If an OpenAI API key is configured, proxy the request to OpenAI's Chat Completions API.
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 400,
-        }),
-      });
-
-      const data = await res.json();
-      const reply = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || JSON.stringify(data);
-      return { reply };
-    } catch (err) {
-      fastify.log.error(err);
-      return { error: 'AI request failed', details: String(err) };
-    }
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.pipe(res);
+    archive.append(`# ${prompt}\n\nGenerated mock app by TitoNova`, { name: 'README.md' });
+    archive.append(JSON.stringify({ name: 'titonova-app' }, null, 2), { name: 'package.json' });
+    archive.append('<!-- Mock index.html -->', { name: 'index.html' });
+    await archive.finalize();
+    return;
   }
 
-  // Fallback mock response when no API key is configured.
-  return { reply: `(mock) AI reply to: ${prompt}` };
+  try {
+    const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are an assistant that outputs a JSON object with a `files` map where keys are filenames and values are file contents. Respond ONLY with the JSON object.' },
+          { role: 'user', content: `Create a minimal project scaffold for this prompt:\n${prompt}` },
+        ],
+        max_tokens: 1500,
+        temperature: 0.2,
+      }),
+    });
+
+    const text = await openaiRes.text();
+    let json;
+    try {
+      // Some models may wrap JSON in markdown; attempt to extract JSON block
+      const match = text.match(/\{[\s\S]*\}$/m);
+      const jsonText = match ? match[0] : text;
+      json = JSON.parse(jsonText);
+    } catch (err) {
+      return res.status(502).json({ error: 'Failed to parse JSON from OpenAI', details: text });
+    }
+
+    const files = json.files || {};
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="titonova-app.zip"');
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => {
+      console.error('Archive error', err);
+      res.status(500).end();
+    });
+    archive.pipe(res);
+
+    for (const [filename, content] of Object.entries(files)) {
+      archive.append(typeof content === 'string' ? content : JSON.stringify(content, null, 2), { name: filename });
+    }
+
+    await archive.finalize();
+  } catch (err) {
+    console.error('generate-app error', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Server error', details: String(err) });
+    else res.end();
+  }
 });
 
-fastify.listen({ port: 3001, host: "0.0.0.0" });
+app.listen(PORT, () => {
+  console.log(`API running on http://localhost:${PORT}`);
+});
