@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { generateHandler } from "./api/generate.js";
+import { generateHandler } from "./generate.js";
 import archiver from "archiver";
 
 const app = express();
