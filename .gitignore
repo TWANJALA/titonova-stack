@@ -1,0 +1,24 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+pnpm-lock.yaml
+
+# macOS
+.DS_Store
+
+# Env
+.env
+.env.local
+
+# API
+api/node_modules/
+api/package-lock.json
+
+# Frontend (studio is a nested git repo)
+studio/
+
+# Templates
+templates/
